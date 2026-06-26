@@ -1,0 +1,5 @@
+# TESTING ONLY: allowed customer prefixes (used by `ginkgo` integration tests)
+#
+# When -whitelistURL points here, ONLY answer IPs inside these prefixes resolve.
+203.0.113.0/24      # IPv4 customer block (TEST-NET-3)
+2001:db8:abcd::/48  # IPv6 customer block (documentation range)

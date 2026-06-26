@@ -1,0 +1,60 @@
+package xip
+
+// White-box tests for the unexported whitelist matching logic. They live in
+// `package xip` (not `xip_test`) so they can call x.allowedByWhitelist directly.
+
+import (
+	"net"
+	"testing"
+
+	"golang.org/x/net/dns/dnsmessage"
+)
+
+func mustCIDR(s string) net.IPNet {
+	_, n, err := net.ParseCIDR(s)
+	if err != nil {
+		panic(err)
+	}
+	return *n
+}
+
+func TestAllowedByWhitelist(t *testing.T) {
+	x := &Xip{WhitelistCIDRs: []net.IPNet{
+		mustCIDR("203.0.113.0/24"),     // a customer IPv4 block
+		mustCIDR("2001:db8:abcd::/48"), // a customer IPv6 block
+	}}
+
+	cases := []struct {
+		name     string
+		hostname string
+		want     bool
+	}{
+		{"in-prefix IPv4 resolves", "203-0-113-5.example.com.", true},
+		{"out-of-prefix IPv4 rejected", "8-8-8-8.example.com.", false},
+		{"in-prefix IPv6 resolves", "2001-db8-abcd--1.example.com.", true},
+		{"out-of-prefix IPv6 rejected", "2001-db8-ffff--1.example.com.", false},
+		{"non-IP-encoding name passes through", "not-an-ip.example.com.", true},
+	}
+	for _, tc := range cases {
+		if got := x.allowedByWhitelist(tc.hostname); got != tc.want {
+			t.Errorf("%s: allowedByWhitelist(%q) = %v, want %v", tc.name, tc.hostname, got, tc.want)
+		}
+	}
+
+	// Feature off: an empty whitelist must allow everything (preserves default behavior).
+	xOff := &Xip{}
+	if !xOff.allowedByWhitelist("8-8-8-8.example.com.") {
+		t.Errorf("empty whitelist should allow all, but 8.8.8.8 was rejected")
+	}
+
+	// Operator-defined records (Customizations) are exempt even when their IP is
+	// outside every customer prefix (8.8.8.8 is not in 203.0.113.0/24).
+	const customName = "ns-whitelist-test.example.com."
+	Customizations[customName] = DomainCustomization{
+		A: []dnsmessage.AResource{{A: [4]byte{8, 8, 8, 8}}},
+	}
+	defer delete(Customizations, customName)
+	if !x.allowedByWhitelist(customName) {
+		t.Errorf("Customizations entry %q should be exempt from the whitelist", customName)
+	}
+}

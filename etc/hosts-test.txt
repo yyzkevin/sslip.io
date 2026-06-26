@@ -1,0 +1,7 @@
+# TESTING ONLY: static "fqdn=ip" records (used by `ginkgo` integration tests)
+#
+# Note 1.2.3.4 is deliberately OUTSIDE the whitelist-test.txt prefixes, to prove
+# that operator-defined static records bypass the whitelist.
+ns1.example.com=1.2.3.4
+ns2.example.com=2.3.4.5
+ns1.example.com=2001:db8::1   # ns1 also gets an AAAA record
