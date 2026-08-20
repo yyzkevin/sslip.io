@@ -1,0 +1,11 @@
+# Example static-hostnames file for `-hosts-file etc/hosts.txt`.
+#
+# Each non-comment line is a "fqdn=ip" record, identical in format to -addresses.
+# Names MUST be fully-qualified (e.g. "ns1.example.com", NOT bare "ns1"): the
+# server only appends a trailing dot, it does not append a domain. A host may
+# appear on multiple lines to get several A and/or AAAA records. These records
+# are served regardless of any -whitelistURL (operator records are exempt).
+ns1.example.com=1.2.3.4
+ns2.example.com=2.3.4.5
+ns1.example.com=2001:db8::1   # ns1 also gets an AAAA record
+example.com=1.2.3.4           # apex A record

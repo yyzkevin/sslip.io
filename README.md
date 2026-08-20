@@ -138,6 +138,26 @@ as ARM64 (AWS Graviton, Apple M1/M2).
   (<https://raw.githubusercontent.com/cunnie/sslip.io/main/etc/blocklist.txt>).
   The blocklist is not a show-stopper: if the DNS server can't download the
   blocklist, it logs a message and continues to serve DNS queries
+- `-whitelistURL` is the _inverse_ of the blocklist: an allow-list of **your**
+  IPv4/IPv6 prefixes. If set, the server **only** answers when the IP encoded in
+  the queried hostname falls inside one of those prefixes; every other name is
+  treated as non-existent (an empty answer with an SOA, i.e. NXDOMAIN-style).
+  Useful when you offer the service only to your own customers, identified by
+  their IP ranges. The argument is a URL or `file://` path (e.g.
+  `-whitelistURL=file://etc/whitelist.txt`); the file has one CIDR or IP per
+  line (IPv4 and IPv6 may be mixed; a bare IP is a `/32` or `/128`), with `#`
+  comments. Your own records (set via `-addresses`/`-hosts-file`) are exempt, so
+  your nameservers and apex always resolve. The whitelist is loaded once at
+  startup. Default is empty (disabled — every IP resolves, as before). Tip: pair
+  it with `-blocklistURL=file://etc/blocklist-empty.txt` if you'd rather not
+  download the public blocklist.
+- `-hosts-file` loads static `fqdn=ip` records from a file, one per line, with
+  `#` comments — equivalent to appending each line to `-addresses`, but easier to
+  manage for a long list (e.g. when sslip.io is the only nameserver for a
+  domain). Example file line: `ns1.example.com=1.2.3.4`. **Names must be
+  fully-qualified** (`ns1.example.com`, not bare `ns1`): the server only appends
+  a trailing dot, it does not append a domain. A host may appear on several lines
+  to get multiple A and/or AAAA records. Example: `-hosts-file etc/hosts.txt`.
 - `ptr-domain` the domain to use for PTR records. For example, if you set
   `ptr-domain=ip.example.com` and then do a reverse-lookup (PTR record), e.g.
   `dig -x 127.0.0.1`, the result will be `127-0-0-1.ip.example.com`. Best

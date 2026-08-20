@@ -32,6 +32,8 @@ type Xip struct {
 	BlocklistIPs                map[string]struct{}     // list of blocked IPs; no A/AAAA records should resolve to these IPs
 	BlocklistStrings            []string                // list of blocked strings that shouldn't appear in public hostnames
 	BlocklistUpdated            time.Time               // The most recent time the Blocklist was updated
+	WhitelistCIDRs              []net.IPNet             // if non-empty, ONLY answer IPs inside these CIDRs resolve (the inverse of the blocklist)
+	WhitelistUpdated            time.Time               // The most recent time the Whitelist was loaded
 	NameServers                 []dnsmessage.NSResource // The list of authoritative name servers (NS)
 	Public                      bool                    // Whether to resolve public IPs; set to false if security-conscious
 	PtrDomain                   string                  // The domain to use for PTR records, e.g. if "nip.io", `dig -x 127.0.0.1` will return "127-0-0-1.nip.io."
@@ -50,6 +52,7 @@ type Metrics struct {
 	AnsweredTXTVersionQueries       int
 	AnsweredNSDNS01ChallengeQueries int
 	AnsweredBlockedQueries          int
+	AnsweredNonWhitelistedQueries   int
 	AnsweredPTRQueriesIPv4          int
 	AnsweredPTRQueriesIPv6          int
 }
@@ -1098,6 +1101,12 @@ func TXTMetrics(x *Xip, _ net.IP) (txtResources []dnsmessage.TXTResource, err er
 		len(x.BlocklistIPs),
 		len(x.BlocklistStrings),
 	))
+	if len(x.WhitelistCIDRs) > 0 {
+		metrics = append(metrics, fmt.Sprintf("Whitelist: %s %d",
+			x.WhitelistUpdated.Format("2006-01-02 15:04:05-07"),
+			len(x.WhitelistCIDRs),
+		))
+	}
 	metrics = append(metrics, fmt.Sprintf("Queries: %d (%.1f/s)", x.Metrics.Queries, float64(x.Metrics.Queries)/uptime.Seconds()))
 	metrics = append(metrics, fmt.Sprintf("TCP/UDP: %d/%d", x.Metrics.TCPQueries, x.Metrics.UDPQueries))
 	metrics = append(metrics, fmt.Sprintf("Answer > 0: %d (%.1f/s)", x.Metrics.AnsweredQueries, float64(x.Metrics.AnsweredQueries)/uptime.Seconds()))
@@ -1108,6 +1117,7 @@ func TXTMetrics(x *Xip, _ net.IP) (txtResources []dnsmessage.TXTResource, err er
 	metrics = append(metrics, fmt.Sprintf("PTR IPv4/IPv6: %d/%d", x.Metrics.AnsweredPTRQueriesIPv4, x.Metrics.AnsweredPTRQueriesIPv6))
 	metrics = append(metrics, fmt.Sprintf("NS DNS-01: %d", x.Metrics.AnsweredNSDNS01ChallengeQueries))
 	metrics = append(metrics, fmt.Sprintf("Blocked: %d", x.Metrics.AnsweredBlockedQueries))
+	metrics = append(metrics, fmt.Sprintf("Non-whitelisted: %d", x.Metrics.AnsweredNonWhitelistedQueries))
 	for _, metric := range metrics {
 		txtResources = append(txtResources, dnsmessage.TXTResource{TXT: []string{metric}})
 	}
@@ -1272,6 +1282,138 @@ func (x *Xip) blocklist(hostname string) bool {
 	return false
 }
 
+// allowedByWhitelist reports whether the hostname's resolved IP is permitted by
+// the whitelist. It is the inverse of blocklist(): if no whitelist is configured
+// the feature is off and everything is allowed; operator-defined records
+// (Customizations such as ns1, the apex, NS records) always resolve; otherwise
+// the embedded/encoded answer IP must fall inside one of the WhitelistCIDRs.
+// Supports both IPv4 (A) and IPv6 (AAAA): net.IPNet.Contains is family-aware, so
+// an IPv4 answer only matches IPv4 prefixes and an IPv6 answer only IPv6 prefixes.
+func (x *Xip) allowedByWhitelist(hostname string) bool {
+	if len(x.WhitelistCIDRs) == 0 {
+		return true // whitelist disabled → allow all (preserves default behavior)
+	}
+	if _, ok := Customizations[strings.ToLower(hostname)]; ok {
+		return true // operator-defined static records always resolve
+	}
+	aResources := NameToA(hostname, true)
+	aaaaResources := NameToAAAA(hostname, true)
+	if len(aResources) == 0 && len(aaaaResources) == 0 {
+		return true // not an IP-encoding name; let the normal empty/SOA handling proceed
+	}
+	var ip net.IP
+	if len(aResources) == 1 {
+		ip = aResources[0].A[:]
+	}
+	if len(aaaaResources) == 1 {
+		ip = aaaaResources[0].AAAA[:]
+	}
+	if ip == nil { // placate the linter; shouldn't be nil given the check above
+		return true
+	}
+	for _, cidr := range x.WhitelistCIDRs {
+		if cidr.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// LoadWhitelist reads the whitelist of allowed CIDRs/IPs from whitelistURL (an
+// "http(s)://" URL or a "file://" path) and stores it on x. Unlike the blocklist,
+// it is loaded once at startup with no periodic re-download. Returns a log message.
+func (x *Xip) LoadWhitelist(whitelistURL string) string {
+	var err error
+	var whitelistReader io.ReadCloser
+	fileProtocolRE := regexp.MustCompile(`^file://`)
+	if fileProtocolRE.MatchString(whitelistURL) {
+		whitelistPath := strings.TrimPrefix(whitelistURL, "file://")
+		whitelistReader, err = os.Open(whitelistPath)
+		if err != nil {
+			return fmt.Sprintf(`failed to open whitelist "%s": %s`, whitelistPath, err.Error())
+		}
+		//noinspection GoUnhandledErrorResult
+		defer whitelistReader.Close()
+	} else {
+		resp, err := http.Get(whitelistURL)
+		if err != nil {
+			return fmt.Sprintf(`failed to download whitelist "%s": %s`, whitelistURL, err.Error())
+		}
+		whitelistReader = resp.Body
+		//noinspection GoUnhandledErrorResult
+		defer whitelistReader.Close()
+		if resp.StatusCode > 299 {
+			return fmt.Sprintf(`failed to download whitelist "%s", HTTP status: "%d"`, whitelistURL, resp.StatusCode)
+		}
+	}
+	whitelistCIDRs, err := ReadWhitelist(whitelistReader)
+	if err != nil {
+		return fmt.Sprintf(`failed to parse whitelist "%s": %s`, whitelistURL, err.Error())
+	}
+	x.WhitelistCIDRs = whitelistCIDRs
+	x.WhitelistUpdated = time.Now()
+	return fmt.Sprintf("Successfully loaded whitelist from %s: %v", whitelistURL, x.WhitelistCIDRs)
+}
+
+// ReadWhitelist parses a whitelist of allowed prefixes: one CIDR or IP per line,
+// with "#" comments and blank lines ignored. Bare IPs are promoted to host routes
+// (/32 for IPv4, /128 for IPv6). IPv4 and IPv6 may be mixed freely. Public to make
+// testing easier.
+func ReadWhitelist(whitelist io.Reader) (whitelistCIDRs []net.IPNet, err error) {
+	scanner := bufio.NewScanner(whitelist)
+	whitelistCIDRs = []net.IPNet{}
+	comments := regexp.MustCompile(`#.*`)
+	for scanner.Scan() {
+		line := comments.ReplaceAllString(scanner.Text(), "") // strip comments
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// CIDR? e.g. "203.0.113.0/24" or "2001:db8:abcd::/48"
+		if _, ipNet, parseErr := net.ParseCIDR(line); parseErr == nil {
+			whitelistCIDRs = append(whitelistCIDRs, *ipNet)
+			continue
+		}
+		// bare IP? promote to a host route (/32 for IPv4, /128 for IPv6)
+		if ip := net.ParseIP(line); ip != nil {
+			bits := 128
+			if ip4 := ip.To4(); ip4 != nil {
+				bits = 32
+				ip = ip4
+			}
+			whitelistCIDRs = append(whitelistCIDRs, net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
+		// neither a CIDR nor an IP; skip silently like the blocklist does
+	}
+	if err = scanner.Err(); err != nil {
+		return []net.IPNet{}, err
+	}
+	return whitelistCIDRs, nil
+}
+
+// ReadHostsFile reads static "fqdn=ip" records (one per line) for the -hosts-file
+// flag, stripping "#" comments and blank lines. The returned lines are fed,
+// unchanged, through the same parser used for the -addresses flag (see NewXip), so
+// they share its IPv4/IPv6 handling, multiple-records-per-host support, and FQDN
+// (trailing-dot) normalization. Public to make testing easier.
+func ReadHostsFile(r io.Reader) (lines []string, err error) {
+	scanner := bufio.NewScanner(r)
+	comments := regexp.MustCompile(`#.*`)
+	for scanner.Scan() {
+		line := comments.ReplaceAllString(scanner.Text(), "")
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	if err = scanner.Err(); err != nil {
+		return nil, err
+	}
+	return lines, nil
+}
+
 func (x *Xip) nameToAwithBlocklist(q dnsmessage.Question, response Response, logMessage string) (_ Response, _ string, err error) {
 	nameToAs := NameToA(q.Name.String(), x.Public)
 	if len(nameToAs) == 0 {
@@ -1283,6 +1425,16 @@ func (x *Xip) nameToAwithBlocklist(q dnsmessage.Question, response Response, log
 					return err
 				}
 				return nil
+			})
+		return response, logMessage + "nil, SOA " + soaLogMessage(soaResource), nil
+	}
+	if !x.allowedByWhitelist(q.Name.String()) {
+		// Not one of our customers' prefixes; respond as though the name doesn't exist (empty answer + SOA)
+		x.Metrics.AnsweredNonWhitelistedQueries++
+		soaHeader, soaResource := SOAAuthority(q.Name)
+		response.Authorities = append(response.Authorities,
+			func(b *dnsmessage.Builder) error {
+				return b.SOAResource(soaHeader, soaResource)
 			})
 		return response, logMessage + "nil, SOA " + soaLogMessage(soaResource), nil
 	}
@@ -1394,6 +1546,16 @@ func (x *Xip) nameToAAAAwithBlocklist(q dnsmessage.Question, response Response, 
 					return err
 				}
 				return nil
+			})
+		return response, logMessage + "nil, SOA " + soaLogMessage(soaResource), nil
+	}
+	if !x.allowedByWhitelist(q.Name.String()) {
+		// Not one of our customers' prefixes; respond as though the name doesn't exist (empty answer + SOA)
+		x.Metrics.AnsweredNonWhitelistedQueries++
+		soaHeader, soaResource := SOAAuthority(q.Name)
+		response.Authorities = append(response.Authorities,
+			func(b *dnsmessage.Builder) error {
+				return b.SOAResource(soaHeader, soaResource)
 			})
 		return response, logMessage + "nil, SOA " + soaLogMessage(soaResource), nil
 	}

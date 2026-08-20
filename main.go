@@ -19,6 +19,10 @@ func main() {
 	var blocklistURL = flag.String("blocklistURL",
 		"https://raw.githubusercontent.com/cunnie/sslip.io-blocklist/main/blocklist.txt",
 		`URL containing a list of non-resolvable IPs/names/CIDRs, usually phishing or scamming sites. Example "file://etc/blocklist.txt"`)
+	var whitelistURL = flag.String("whitelistURL", "",
+		`URL/file of YOUR allowed IPv4/IPv6 prefixes (one CIDR or IP per line). If set, ONLY answer IPs inside these prefixes resolve; everything else is treated as non-existent. Your own records (-addresses/-hosts-file) are exempt. Example "file://etc/whitelist.txt"`)
+	var hostsFile = flag.String("hosts-file", "",
+		`path to a file of static "fqdn=ip" records (e.g. "ns1.example.com=1.2.3.4"), one per line, "#" comments allowed. Names must be fully-qualified. Equivalent to appending each line to -addresses`)
 	var nameservers = flag.String("nameservers", "ns-00.nip.io.,ns-01.nip.io.,ns-ovh.sslip.io.",
 		"comma-separated list of FQDNs of nameservers. If you're running your own sslip.io nameservers, set them here")
 	var addresses = flag.String("addresses",
@@ -61,8 +65,25 @@ func main() {
 	log.Printf("blocklist URL: %s, name servers: %s, bind port: %d, quiet: %t",
 		*blocklistURL, *nameservers, *bindPort, *quiet)
 
-	x, logmessages := xip.NewXip(*blocklistURL, strings.Split(*nameservers, ","), strings.Split(*addresses, ","), strings.Split(*delegates, ","), *ptrDomain)
+	addressLines := strings.Split(*addresses, ",")
+	if *hostsFile != "" {
+		f, err := os.Open(*hostsFile)
+		if err != nil {
+			log.Fatalf("could not open -hosts-file %q: %v", *hostsFile, err)
+		}
+		fileLines, err := xip.ReadHostsFile(f)
+		_ = f.Close()
+		if err != nil {
+			log.Fatalf("could not parse -hosts-file %q: %v", *hostsFile, err)
+		}
+		addressLines = append(addressLines, fileLines...)
+	}
+
+	x, logmessages := xip.NewXip(*blocklistURL, strings.Split(*nameservers, ","), addressLines, strings.Split(*delegates, ","), *ptrDomain)
 	x.Public = *public
+	if *whitelistURL != "" {
+		log.Println(x.LoadWhitelist(*whitelistURL))
+	}
 	for _, logmessage := range logmessages {
 		log.Println(logmessage)
 	}

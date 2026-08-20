@@ -240,7 +240,7 @@ var _ = Describe("Xip", func() {
 			It("returns metrics information", func() {
 				txts, err := x.TXTResources("metrics.status.sslip.io.", nil)
 				Expect(err).To(Not(HaveOccurred()))
-				Expect(len(txts)).To(Equal(12))
+				Expect(len(txts)).To(Equal(13))
 				Expect(txts[0].TXT[0]).To(MatchRegexp(`Uptime: 0`))
 				Expect(txts[1].TXT[0]).To(MatchRegexp(`Blocklist: 0001-01-01 00:00:00\+00 0,0`))
 				Expect(txts[2].TXT[0]).To(MatchRegexp(`Queries: 0 \(0.0/s\)`))
@@ -261,7 +261,7 @@ var _ = Describe("Xip", func() {
 			It("returns metrics information", func() {
 				txts, err := x.TXTResources("metrics.status.nip.io.", nil)
 				Expect(err).To(Not(HaveOccurred()))
-				Expect(len(txts)).To(Equal(12))
+				Expect(len(txts)).To(Equal(13))
 				Expect(txts[0].TXT[0]).To(MatchRegexp(`Uptime: 0`))
 				Expect(txts[1].TXT[0]).To(MatchRegexp(`Blocklist: 0001-01-01 00:00:00\+00 0,0`))
 				Expect(txts[2].TXT[0]).To(MatchRegexp(`Queries: 0 \(0.0/s\)`))
@@ -584,6 +584,65 @@ var _ = Describe("Xip", func() {
 			Expect(len(blCIDRs)).To(BeZero())
 			Expect(blIPs).To(Equal(map[string]struct{}{"104.155.144.4": {}}))
 			Expect(len(blStrings)).To(BeZero())
+		})
+	})
+
+	Describe("ReadWhitelist()", func() {
+		cidrStrings := func(nets []net.IPNet) []string {
+			out := []string{}
+			for _, n := range nets {
+				out = append(out, n.String())
+			}
+			return out
+		}
+		It("strips comments and blank lines", func() {
+			input := strings.NewReader("# only my customers\n\n   \n203.0.113.0/24 # a customer\n")
+			wl, err := xip.ReadWhitelist(input)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cidrStrings(wl)).To(Equal([]string{"203.0.113.0/24"}))
+		})
+		It("reads in both IPv4 and IPv6 CIDRs, preserving order", func() {
+			input := strings.NewReader("203.0.113.0/24\n2001:db8:abcd::/48\n")
+			wl, err := xip.ReadWhitelist(input)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cidrStrings(wl)).To(Equal([]string{"203.0.113.0/24", "2001:db8:abcd::/48"}))
+		})
+		It("promotes a bare IPv4 address to a /32 host route", func() {
+			input := strings.NewReader("198.51.100.42")
+			wl, err := xip.ReadWhitelist(input)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cidrStrings(wl)).To(Equal([]string{"198.51.100.42/32"}))
+		})
+		It("promotes a bare IPv6 address to a /128 host route", func() {
+			input := strings.NewReader("2001:db8::1")
+			wl, err := xip.ReadWhitelist(input)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cidrStrings(wl)).To(Equal([]string{"2001:db8::1/128"}))
+		})
+		It("ignores lines that are neither a CIDR nor an IP", func() {
+			input := strings.NewReader("not-an-ip\n203.0.113.0/24\nstill bogus\n")
+			wl, err := xip.ReadWhitelist(input)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cidrStrings(wl)).To(Equal([]string{"203.0.113.0/24"}))
+		})
+	})
+
+	Describe("ReadHostsFile()", func() {
+		It("returns host=ip lines, stripping comments and blank lines (IPv4 and IPv6)", func() {
+			input := strings.NewReader("# my nameservers\nns1.example.com=1.2.3.4\n\nns2.example.com=2.3.4.5 # the second\nns1.example.com=2001:db8::1\n")
+			lines, err := xip.ReadHostsFile(input)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(lines).To(Equal([]string{
+				"ns1.example.com=1.2.3.4",
+				"ns2.example.com=2.3.4.5",
+				"ns1.example.com=2001:db8::1",
+			}))
+		})
+		It("returns no lines for an empty or comment-only file", func() {
+			input := strings.NewReader("# nothing here\n\n   \n")
+			lines, err := xip.ReadHostsFile(input)
+			Expect(err).ToNot(HaveOccurred())
+			Expect(lines).To(BeEmpty())
 		})
 	})
 

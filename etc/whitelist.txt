@@ -1,0 +1,13 @@
+# Example whitelist for `-whitelistURL "file://etc/whitelist.txt"`.
+#
+# If -whitelistURL is set, the server ONLY answers when the IP encoded in the
+# queried hostname falls inside one of these prefixes; every other name is
+# treated as non-existent (empty answer + SOA). Your own static records
+# (-addresses / -hosts-file) are exempt. One CIDR or IP per line; "#" comments
+# and blank lines are ignored. IPv4 and IPv6 may be mixed. A bare IP is treated
+# as a /32 (IPv4) or /128 (IPv6) host route.
+203.0.113.0/24      # a customer IPv4 block
+198.51.100.42       # a single customer host (treated as /32)
+2001:db8:abcd::/48  # a customer IPv6 block
+# 127.0.0.0/8       # uncomment to keep localhost/testing working
+# ::1/128           # uncomment to keep IPv6 localhost working

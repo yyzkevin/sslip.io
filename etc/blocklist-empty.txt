@@ -1,0 +1,3 @@
+# An empty blocklist. Point -blocklistURL here ("file://etc/blocklist-empty.txt")
+# to disable the default blocklist download from GitHub, e.g. when you gate access
+# with -whitelistURL instead.
