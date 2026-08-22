@@ -34,6 +34,7 @@ type Xip struct {
 	BlocklistUpdated            time.Time               // The most recent time the Blocklist was updated
 	WhitelistCIDRs              []net.IPNet             // if non-empty, ONLY answer IPs inside these CIDRs resolve (the inverse of the blocklist)
 	WhitelistUpdated            time.Time               // The most recent time the Whitelist was loaded
+	DelegateLabel               string                  // if set (e.g. "zone"), names under <label>.<embedded-ip>... are NS-delegated to the embedded-IP host
 	NameServers                 []dnsmessage.NSResource // The list of authoritative name servers (NS)
 	Public                      bool                    // Whether to resolve public IPs; set to false if security-conscious
 	PtrDomain                   string                  // The domain to use for PTR records, e.g. if "nip.io", `dig -x 127.0.0.1` will return "127-0-0-1.nip.io."
@@ -97,7 +98,9 @@ var (
 	ipv6ReverseRE    = regexp.MustCompile(`^(([[:xdigit:]]\.){32})ip6\.arpa\.`)
 	dns01ChallengeRE = regexp.MustCompile(`(?i)_acme-challenge\.`) // (?i) → non-capturing case insensitive
 
-	mbox, _       = dnsmessage.NewName("briancunnie.gmail.com.")
+	mbox, _       = dnsmessage.NewName("briancunnie.gmail.com.") // SOA RNAME (contact); overridable via SetSOAContact
+	soaMname      dnsmessage.Name                                // SOA MNAME override (SetSOAMName); zero value = echo the queried name
+	soaMnameSet   bool
 	mx1, _        = dnsmessage.NewName("mail.protonmail.ch.")
 	mx2, _        = dnsmessage.NewName("mailsec.protonmail.ch.")
 	dkim1Sslip, _ = dnsmessage.NewName("protonmail.domainkey.dw4gykv5i2brtkjglrf34wf6kbxpa5hgtmg2xqopinhgxn5axo73a.domains.proton.ch.")
@@ -470,6 +473,13 @@ func (x *Xip) processQuestion(q dnsmessage.Question, srcAddr net.IP) (response R
 		// and a query comes in for 127-0-0-1.cloudfoundry.xip.pivotal.io
 		// then don't resolve the A record; instead, return the delegated
 		// NS record, ns-437.awsdns-54.com.
+		response.Header.Authoritative = false
+		return x.NSResponse(q.Name, response, logMessage)
+	}
+	if target := x.delegateLabelTarget(q.Name.String()); target != "" &&
+		x.allowedByWhitelist(target) && !x.blocklist(target) {
+		// stateless subtree delegation: x.zone.1-2-3-4.example.com is
+		// NS-delegated to 1-2-3-4.example.com (the customer's DNS server)
 		response.Header.Authoritative = false
 		return x.NSResponse(q.Name, response, logMessage)
 	}
@@ -918,6 +928,31 @@ func IsAcmeChallenge(fqdnString string) bool {
 	return false
 }
 
+// delegateLabelTarget returns the delegation target for names under the
+// configured delegate label (e.g. with DelegateLabel "zone",
+// "x.zone.1-2-3-4.example.com." → "1-2-3-4.example.com."), or "" if the
+// feature is off, there's no whole-label match, or the remainder to the
+// right of the label doesn't embed an IPv4/IPv6 address.
+func (x *Xip) delegateLabelTarget(fqdn string) string {
+	if x.DelegateLabel == "" {
+		return ""
+	}
+	lower := strings.ToLower(fqdn)
+	needle := x.DelegateLabel + "."
+	var target string
+	if strings.HasPrefix(lower, needle) { // apex: zone.<ip>...
+		target = lower[len(needle):]
+	} else if i := strings.Index(lower, "."+needle); i >= 0 { // leftmost ".zone."
+		target = lower[i+1+len(needle):]
+	} else {
+		return ""
+	}
+	if len(NameToA(target, true)) == 0 && len(NameToAAAA(target, true)) == 0 {
+		return "" // remainder doesn't embed an IP → not a delegation
+	}
+	return target
+}
+
 func IsDelegated(fqdnString string) bool {
 	fqdnStringLowerCased := strings.ToLower(fqdnString)
 	for domain := range Customizations {
@@ -948,6 +983,10 @@ func (x *Xip) NSResources(fqdnString string) []dnsmessage.NSResource {
 		if strings.HasSuffix(fqdnStringLowerCased, "."+domain) || fqdnStringLowerCased == domain {
 			return Customizations[domain].NS
 		}
+	}
+	if target := x.delegateLabelTarget(fqdnStringLowerCased); target != "" {
+		ns, _ := dnsmessage.NewName(target)
+		return []dnsmessage.NSResource{{NS: ns}}
 	}
 	if IsAcmeChallenge(fqdnStringLowerCased) {
 		x.Metrics.AnsweredNSDNS01ChallengeQueries++
@@ -981,10 +1020,41 @@ func SOAAuthority(name dnsmessage.Name) (dnsmessage.ResourceHeader, dnsmessage.S
 	}, SOAResource(name)
 }
 
-// SOAResource returns the hard-coded (except MNAME) SOA
+// SetSOAContact sets the SOA RNAME (contact) for all SOA records. It accepts
+// either an email ("support@inverdigm.ca") or the DNS dotted form
+// ("support.inverdigm.ca"); the first "@" is converted to "." per RFC 1035.
+// Returns an error if the result isn't a valid DNS name.
+func SetSOAContact(contact string) error {
+	contact = strings.TrimSuffix(strings.Replace(contact, "@", ".", 1), ".")
+	name, err := dnsmessage.NewName(contact + ".")
+	if err != nil {
+		return err
+	}
+	mbox = name
+	return nil
+}
+
+// SetSOAMName sets the SOA MNAME (primary nameserver) for all SOA records,
+// overriding the default behavior of echoing the queried name. Returns an error
+// if host isn't a valid DNS name.
+func SetSOAMName(host string) error {
+	name, err := dnsmessage.NewName(strings.TrimSuffix(host, ".") + ".")
+	if err != nil {
+		return err
+	}
+	soaMname = name
+	soaMnameSet = true
+	return nil
+}
+
+// SOAResource returns the hard-coded (except MNAME & overridable MBox) SOA
 func SOAResource(name dnsmessage.Name) dnsmessage.SOAResource {
+	mname := name
+	if soaMnameSet {
+		mname = soaMname
+	}
 	return dnsmessage.SOAResource{
-		NS:     name,
+		NS:     mname,
 		MBox:   mbox,
 		Serial: 20260516,
 		// cribbed the Refresh/Retry/Expire from google.com.

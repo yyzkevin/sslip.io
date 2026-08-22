@@ -23,6 +23,12 @@ func main() {
 		`URL/file of YOUR allowed IPv4/IPv6 prefixes (one CIDR or IP per line). If set, ONLY answer IPs inside these prefixes resolve; everything else is treated as non-existent. Your own records (-addresses/-hosts-file) are exempt. Example "file://etc/whitelist.txt"`)
 	var hostsFile = flag.String("hosts-file", "",
 		`path to a file of static "fqdn=ip" records (e.g. "ns1.example.com=1.2.3.4"), one per line, "#" comments allowed. Names must be fully-qualified. Equivalent to appending each line to -addresses`)
+	var delegateLabel = flag.String("delegate-label", "",
+		`DNS label that triggers stateless subtree delegation: names matching *.<label>.<embedded-ip>.<domain> are NS-delegated to the embedded-IP host. E.g. with -delegate-label=zone, "x.zone.1-2-3-4.example.com" is delegated to "1-2-3-4.example.com" (the customer's DNS server at 1.2.3.4). Empty = disabled`)
+	var soaEmail = flag.String("soa-email", "",
+		`contact for the SOA record, e.g. "hostmaster@example.com" (served as "hostmaster.example.com."). If unset, the built-in default is used`)
+	var soaMname = flag.String("soa-mname", "",
+		`primary nameserver (MNAME) for the SOA record, e.g. "ns1.example.com". If unset, the queried name is echoed (the legacy behavior)`)
 	var nameservers = flag.String("nameservers", "ns-00.nip.io.,ns-01.nip.io.,ns-ovh.sslip.io.",
 		"comma-separated list of FQDNs of nameservers. If you're running your own sslip.io nameservers, set them here")
 	var addresses = flag.String("addresses",
@@ -83,6 +89,22 @@ func main() {
 	x.Public = *public
 	if *whitelistURL != "" {
 		log.Println(x.LoadWhitelist(*whitelistURL))
+	}
+	x.DelegateLabel = strings.ToLower(strings.Trim(*delegateLabel, "."))
+	if x.DelegateLabel != "" {
+		log.Printf("Setting delegate label to %q", x.DelegateLabel)
+	}
+	if *soaEmail != "" {
+		if err := xip.SetSOAContact(*soaEmail); err != nil {
+			log.Fatalf("invalid -soa-email %q: %v", *soaEmail, err)
+		}
+		log.Printf("Setting SOA contact to %q", *soaEmail)
+	}
+	if *soaMname != "" {
+		if err := xip.SetSOAMName(*soaMname); err != nil {
+			log.Fatalf("invalid -soa-mname %q: %v", *soaMname, err)
+		}
+		log.Printf("Setting SOA MNAME to %q", *soaMname)
 	}
 	for _, logmessage := range logmessages {
 		log.Println(logmessage)

@@ -58,3 +58,34 @@ func TestAllowedByWhitelist(t *testing.T) {
 		t.Errorf("Customizations entry %q should be exempt from the whitelist", customName)
 	}
 }
+
+func TestDelegateLabelTarget(t *testing.T) {
+	x := &Xip{DelegateLabel: "zone"}
+
+	cases := []struct {
+		name string
+		fqdn string
+		want string
+	}{
+		{"apex match", "zone.1-2-3-4.example.com.", "1-2-3-4.example.com."},
+		{"nested prefix", "anything.zone.1-2-3-4.example.com.", "1-2-3-4.example.com."},
+		{"deeply nested prefix", "a.b.c.zone.1-2-3-4.example.com.", "1-2-3-4.example.com."},
+		{"leftmost label wins", "a.zone.b.zone.1-2-3-4.example.com.", "b.zone.1-2-3-4.example.com."},
+		{"whole-label only: myzone must not match", "anything.myzone.1-2-3-4.example.com.", ""},
+		{"case-insensitive", "Anything.ZONE.1-2-3-4.Example.Com.", "1-2-3-4.example.com."},
+		{"IPv6 target", "x.zone.2001-db8-abcd--1.example.com.", "2001-db8-abcd--1.example.com."},
+		{"target without an embedded IP", "x.zone.foo.example.com.", ""},
+		{"no label present", "1-2-3-4.example.com.", ""},
+	}
+	for _, tc := range cases {
+		if got := x.delegateLabelTarget(tc.fqdn); got != tc.want {
+			t.Errorf("%s: delegateLabelTarget(%q) = %q, want %q", tc.name, tc.fqdn, got, tc.want)
+		}
+	}
+
+	// Feature off: empty label never delegates.
+	xOff := &Xip{}
+	if got := xOff.delegateLabelTarget("x.zone.1-2-3-4.example.com."); got != "" {
+		t.Errorf("empty DelegateLabel should disable delegation, got %q", got)
+	}
+}

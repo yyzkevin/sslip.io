@@ -151,6 +151,16 @@ as ARM64 (AWS Graviton, Apple M1/M2).
   startup. Default is empty (disabled — every IP resolves, as before). Tip: pair
   it with `-blocklistURL=file://etc/blocklist-empty.txt` if you'd rather not
   download the public blocklist.
+- `-delegate-label` enables **stateless subtree delegation**: any name matching
+  `*.<label>.<embedded-ip>.<domain>` is NS-delegated to the embedded-IP host
+  instead of resolving. E.g. with `-delegate-label=zone`, a query for
+  `x.zone.1-2-3-4.example.com` returns `NS 1-2-3-4.example.com` (plus glue), so
+  the customer runs a DNS server on `1.2.3.4` and controls the whole
+  `zone.1-2-3-4.example.com` subtree — internal hostnames pointing at private
+  IPs, `_acme-challenge` TXT records for DNS-01 certs, wildcards, anything.
+  Names under the label stop resolving to the embedded IP (the referral takes
+  precedence, like `_acme-challenge`). Composes with `-whitelistURL`: only
+  whitelisted embedded IPs are delegated. Empty (default) = disabled.
 - `-hosts-file` loads static `fqdn=ip` records from a file, one per line, with
   `#` comments — equivalent to appending each line to `-addresses`, but easier to
   manage for a long list (e.g. when sslip.io is the only nameserver for a
